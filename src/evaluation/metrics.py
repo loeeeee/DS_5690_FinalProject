@@ -68,7 +68,13 @@ def compute_metrics(
 ) -> Dict[str, float]:
     """Compute perplexity (and optionally BERTScore) over provided texts."""
     prepared = _prepare_texts(texts)
-    ppl = perplexity_from_texts(model, tokenizer, prepared, max_length=max_length)
+    # Use model's device if available, otherwise detect
+    try:
+        model_device = next(model.parameters()).device
+        device_str = str(model_device) if model_device.type == "cuda" else "cpu"
+    except (StopIteration, AttributeError):
+        device_str = None
+    ppl = perplexity_from_texts(model, tokenizer, prepared, max_length=max_length, device=device_str)
     metrics: Dict[str, float] = {"perplexity": ppl}
 
     if compute_bertscore:

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Protocol, Sequence
 
 import torch
+
+logger = logging.getLogger(__name__)
 
 
 class GenerationBatchResult(Protocol):
@@ -44,16 +47,21 @@ class AutoRegressiveWrapper(ModelWrapper):
             padding=True,
             truncation=True,
             max_length=2048,
-        ).to(device)
+        )
+        # Move all tensors in tokenizer_outputs to the model's device
+        tokenizer_outputs = {k: v.to(device) for k, v in tokenizer_outputs.items()}
         max_tokens = max_new_tokens or 128
         with torch.no_grad():
-            # ROCm compatibility: disable Flash Attention and use explicit settings
+            # Standard generation - works on CUDA, may have issues on ROCm
+            logger.debug(f"Starting generation with max_new_tokens={max_tokens}")
             generated = self.model.generate(
                 **tokenizer_outputs,
                 max_new_tokens=max_tokens,
                 use_cache=True,  # LLaMA supports KV cache
                 do_sample=False,  # Greedy decoding for reproducibility
+                pad_token_id=self.tokenizer.pad_token_id,
             )
+            logger.debug(f"Generation completed, output shape: {generated.shape}")
         texts = self.tokenizer.batch_decode(generated, skip_special_tokens=True)
         token_counts: List[int] = []
         for out_ids, in_ids in zip(generated, tokenizer_outputs["input_ids"]):
@@ -81,7 +89,9 @@ class DiffusionLikeWrapper(ModelWrapper):
             padding=True,
             truncation=True,
             max_length=2048,
-        ).to(device)
+        )
+        # Move all tensors in tokenizer_outputs to the model's device
+        tokenizer_outputs = {k: v.to(device) for k, v in tokenizer_outputs.items()}
         generation_kwargs: Dict[str, Any] = {
             "max_new_tokens": max_new_tokens or 128,
             "use_cache": False,  # LLaDA doesn't support KV cache

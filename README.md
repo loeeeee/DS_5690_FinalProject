@@ -40,6 +40,10 @@ Quick start (headless CUDA / SLURM)
 - Optional overrides: `--steps 64 --batch_size 4 --max_prompts 16 --compute_bertscore`.
 - Outputs: latency/throughput CSV at `results/raw_data/raw_metrics.csv` and quality metrics JSON at `results/raw_data/quality_metrics.json`.
 
+Mini test (for GPU validation)
+- Run mini test: `python src/main.py --config config/experiments_mini.yaml --output_dir results/raw_data/smoke --max_prompts 4 --batch_size 1 --steps 16`
+- Note: ROCm (AMD GPUs) may have compatibility issues with model.generate(). The code is designed for CUDA (NVIDIA GPUs) and should work correctly on CUDA systems.
+
 Notes
 - Prompts default to Wikitext-103 validation text; supply `--prompt_file` to use custom prompts.
 - Profiling uses CUDA events when available; falls back to CPU timers otherwise.

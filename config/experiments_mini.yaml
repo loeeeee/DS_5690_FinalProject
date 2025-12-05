@@ -1,0 +1,17 @@
+experiment:
+  baseline_id: "meta-llama/Meta-Llama-3-8B"
+  target_id: "GSAI-ML/LLaDA-8B-Base"
+  precision: "bfloat16"
+  max_new_tokens: 32
+  warmup: 1
+  sequence_lengths: [128]
+  batch_sizes: [1]
+  diffusion_steps: [16]
+  notes: "Mini test configuration for GPU validation - minimal prompts and steps."
+
+dataset:
+  name: "wikitext"
+  config: "wikitext-103-v1"
+  split: "validation"
+  max_prompts: 4
+

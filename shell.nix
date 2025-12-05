@@ -4,11 +4,10 @@
 }:
 
 let
+  # Current nixpkgs has ROCm 6.4.3 (verified: rocmPackages.clr.version = "6.4.3")
   rocmPkgs = pkgs.rocmPackages;
-  pythonEnv = pkgs.python313.withPackages (ps:
-    let
-      t = ps.torchWithRocm.override { rocmPackages = rocmPkgs; };
-    in
+  
+  pythonEnv = pkgs.python312.withPackages (ps:
     with ps; [
       pip
       pyyaml
@@ -31,9 +30,9 @@ let
       tokenizers
       safetensors
       huggingface-hub
-      (transformers.override { torch = t; })
-      (accelerate.override { torch = t; })
-      t
+      (transformers.override { torch = ps.torchWithRocm; })
+      (accelerate.override { torch = ps.torchWithRocm; })
+      ps.torchWithRocm
     ]);
 in
 pkgs.mkShell {
@@ -58,7 +57,7 @@ pkgs.mkShell {
     else
       echo "No .env found; skipping environment variable load."
     fi
-    echo "ROCm shell active (ROCm 6.4, gfx1100). Run: python - <<'PY' ... to verify torch."
+    
+    echo "ROCm shell active (ROCm 6.4.3, gfx1100, torch 2.6). Run: python - <<'PY' ... to verify torch."
   '';
 }
-

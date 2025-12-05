@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import logging
 import math
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
@@ -12,6 +13,12 @@ from typing import Any, Dict, Iterable, List
 import torch
 import yaml
 from datasets import load_dataset
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 from evaluation.metrics import compute_metrics
 from evaluation.profiling import profile_generation
@@ -92,18 +99,31 @@ def _run_model(
 ) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     warmup_prompts = prompts[: min(len(prompts), max(batch_size, 1))]
-    for _ in range(warmup):
+    logger.info(f"Running warmup for {name}: {warmup} iterations")
+    for warmup_idx in range(warmup):
         for batch in _batched(warmup_prompts, batch_size):
-            _ = wrapper.generate_batch(batch, steps=steps, max_new_tokens=max_new_tokens)
+            try:
+                logger.debug(f"Warmup iteration {warmup_idx+1}/{warmup}, batch size: {len(batch)}")
+                _ = wrapper.generate_batch(batch, steps=steps, max_new_tokens=max_new_tokens)
+                logger.debug(f"Warmup iteration {warmup_idx+1} completed")
+            except Exception as e:
+                logger.error(f"Warmup failed at iteration {warmup_idx+1}: {e}")
+                raise
 
+    logger.info(f"Running benchmark for {name}: {len(list(_batched(prompts, batch_size)))} batches")
     for batch_idx, batch in enumerate(_batched(prompts, batch_size)):
+        logger.info(f"Processing batch {batch_idx+1} for {name}")
         result: GenerationBatchResult
-        result, profile = profile_generation(
-            wrapper.generate_batch,
-            batch,
-            steps=steps,
-            max_new_tokens=max_new_tokens,
-        )
+        try:
+            result, profile = profile_generation(
+                wrapper.generate_batch,
+                batch,
+                steps=steps,
+                max_new_tokens=max_new_tokens,
+            )
+        except Exception as e:
+            logger.error(f"Batch {batch_idx+1} failed for {name}: {e}")
+            raise
         total_tokens = sum(result.token_counts)
         throughput = total_tokens / (profile["latency_ms"] / 1000.0) if profile["latency_ms"] > 0 else 0.0
         rows.append(
@@ -150,13 +170,35 @@ def main() -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     precision = experiment.get("precision", "bfloat16")
     
+    # GPU verification and logging
+    if device == "cuda" and torch.cuda.is_available():
+        logger.info("GPU detected and available")
+        logger.info(f"CUDA device count: {torch.cuda.device_count()}")
+        logger.info(f"Current CUDA device: {torch.cuda.current_device()}")
+        logger.info(f"CUDA device name: {torch.cuda.get_device_name(0)}")
+        logger.info(f"CUDA version: {torch.version.cuda}")
+        logger.info(f"PyTorch version: {torch.__version__}")
+        memory_total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        logger.info(f"GPU total memory: {memory_total:.2f} GB")
+    else:
+        logger.warning("CUDA not available, falling back to CPU")
+        logger.info(f"Device: {device}")
+    
     args.output_dir.mkdir(parents=True, exist_ok=True)
     all_rows: List[Dict[str, Any]] = []
 
     # Load baseline model first, run all baseline experiments, then unload
     from models.model_factory import _load_auto_model
     from models.wrappers import AutoRegressiveWrapper
+    logger.info(f"Loading baseline model: {baseline_id}")
     baseline_model, baseline_tokenizer = _load_auto_model(baseline_id, device, precision)
+    # Verify model is on correct device
+    model_device = next(baseline_model.parameters()).device
+    logger.info(f"Baseline model loaded on device: {model_device}")
+    if device == "cuda" and torch.cuda.is_available():
+        memory_allocated = torch.cuda.memory_allocated(0) / (1024**3)
+        memory_reserved = torch.cuda.memory_reserved(0) / (1024**3)
+        logger.info(f"GPU memory after baseline load - allocated: {memory_allocated:.2f} GB, reserved: {memory_reserved:.2f} GB")
     baseline_wrapper = AutoRegressiveWrapper(baseline_model, baseline_tokenizer)
 
     for seq_length in seq_lengths:
@@ -187,7 +229,15 @@ def main() -> None:
     
     # Now load LLaDA model
     from models.wrappers import DiffusionLikeWrapper
+    logger.info(f"Loading target model: {target_id}")
     target_model, target_tokenizer = _load_auto_model(target_id, device, precision)
+    # Verify model is on correct device
+    model_device = next(target_model.parameters()).device
+    logger.info(f"Target model loaded on device: {model_device}")
+    if device == "cuda" and torch.cuda.is_available():
+        memory_allocated = torch.cuda.memory_allocated(0) / (1024**3)
+        memory_reserved = torch.cuda.memory_reserved(0) / (1024**3)
+        logger.info(f"GPU memory after target load - allocated: {memory_allocated:.2f} GB, reserved: {memory_reserved:.2f} GB")
     target_wrapper = DiffusionLikeWrapper(target_model, target_tokenizer)
 
     for seq_length in seq_lengths:

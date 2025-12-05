@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -9,6 +10,8 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from models.wrappers import ModelWrapper
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -18,6 +21,7 @@ class ModelBundle:
 
 
 def _load_auto_model(model_id: str, device: str, precision: str) -> tuple[Any, Any]:
+    logger.info(f"Loading model {model_id} on device {device} with precision {precision}")
     torch_dtype = torch.bfloat16 if precision == "bfloat16" else torch.float16
     tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
     
@@ -35,6 +39,11 @@ def _load_auto_model(model_id: str, device: str, precision: str) -> tuple[Any, A
     }
     
     if device == "cuda":
+        # Log GPU memory before loading
+        if torch.cuda.is_available():
+            memory_before = torch.cuda.memory_allocated(0) / (1024**3)
+            logger.info(f"GPU memory before model load: {memory_before:.2f} GB")
+        
         # Load model with explicit device placement
         # For ROCm compatibility, avoid device_map="auto" during generation
         # Load directly to GPU, but use low_cpu_mem_usage to reduce peak memory
@@ -44,12 +53,20 @@ def _load_auto_model(model_id: str, device: str, precision: str) -> tuple[Any, A
         )
         # Move to GPU explicitly - this is more reliable for ROCm
         model = model.to("cuda")
+        
+        # Verify model is on GPU
+        actual_device = next(model.parameters()).device
+        if actual_device.type != "cuda":
+            logger.error(f"Model loaded on wrong device: {actual_device}, expected cuda")
+        else:
+            logger.info(f"Model successfully moved to GPU: {actual_device}")
     else:
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
             **load_kwargs,
         )
         model = model.to(device)
+        logger.info(f"Model loaded on device: {device}")
     
     model.eval()
     if tokenizer.pad_token_id is None:
@@ -58,6 +75,9 @@ def _load_auto_model(model_id: str, device: str, precision: str) -> tuple[Any, A
     # ROCm compatibility: synchronize after model loading
     if device == "cuda" and torch.cuda.is_available():
         torch.cuda.synchronize()
+        memory_after = torch.cuda.memory_allocated(0) / (1024**3)
+        memory_reserved = torch.cuda.memory_reserved(0) / (1024**3)
+        logger.info(f"GPU memory after model load: allocated={memory_after:.2f} GB, reserved={memory_reserved:.2f} GB")
     
     return model, tokenizer
 

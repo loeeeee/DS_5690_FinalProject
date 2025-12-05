@@ -26,8 +26,6 @@ echo "GPU allocated:"
 nvidia-smi --query-gpu=name,memory.total --format=csv
 
 python src/main.py \
-  --model_name llada-8b \
-  --baseline_name llama-3-8b \
   --config config/experiments.yaml \
   --output_dir results/raw_data
 
