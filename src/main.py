@@ -7,12 +7,16 @@ import csv
 import json
 import logging
 import math
+import signal
+import sys
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from types import FrameType
+from typing import Any, Callable, Dict, Iterable, List
 
 import torch
 import yaml
 from datasets import load_dataset
+from tqdm import tqdm
 
 logging.basicConfig(
     level=logging.INFO,
@@ -116,6 +120,19 @@ def _write_csv(rows: List[Dict[str, Any]], output_path: Path) -> None:
         writer.writerows(rows)
 
 
+def _save_results_incremental(rows: List[Dict[str, Any]], output_path: Path) -> None:
+    """Save results incrementally, appending to CSV if it exists."""
+    if not rows:
+        return
+    _ensure_output_dir(output_path.parent)
+    file_exists = output_path.exists()
+    with output_path.open("a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        if not file_exists:
+            writer.writeheader()
+        writer.writerows(rows)
+
+
 def _summarize(rows: List[Dict[str, Any]]) -> str:
     if not rows:
         return "no rows recorded"
@@ -137,7 +154,11 @@ def _run_model(
     rows: List[Dict[str, Any]] = []
     warmup_prompts = prompts[: min(len(prompts), max(batch_size, 1))]
     logger.info(f"Running warmup for {name}: {warmup} iterations")
-    for warmup_idx in range(warmup):
+    if warmup > 1:
+        warmup_iterable = tqdm(range(warmup), desc=f"Warmup {name}", leave=False)
+    else:
+        warmup_iterable = range(warmup)
+    for warmup_idx in warmup_iterable:
         for batch in _batched(warmup_prompts, batch_size):
             try:
                 logger.debug(f"Warmup iteration {warmup_idx+1}/{warmup}, batch size: {len(batch)}")
@@ -147,8 +168,9 @@ def _run_model(
                 logger.error(f"Warmup failed at iteration {warmup_idx+1}: {e}")
                 raise
 
-    logger.info(f"Running benchmark for {name}: {len(list(_batched(prompts, batch_size)))} batches")
-    for batch_idx, batch in enumerate(_batched(prompts, batch_size)):
+    batches = list(_batched(prompts, batch_size))
+    logger.info(f"Running benchmark for {name}: {len(batches)} batches")
+    for batch_idx, batch in enumerate(tqdm(batches, desc=f"Processing batches {name}", leave=False)):
         logger.info(f"Processing batch {batch_idx+1} for {name}")
         result: GenerationBatchResult
         try:
@@ -181,9 +203,79 @@ def _run_model(
     return rows
 
 
+def _setup_logging(output_dir: Path) -> None:
+    """Setup logging to both console and file."""
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    
+    # Remove existing handlers to avoid duplicates
+    logger.handlers.clear()
+    
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    console_handler.setFormatter(console_formatter)
+    logger.addHandler(console_handler)
+    
+    # File handler
+    log_file = output_dir / "benchmark.log"
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setLevel(logging.INFO)
+    file_formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    file_handler.setFormatter(file_formatter)
+    logger.addHandler(file_handler)
+
+
+def _create_signal_handler(
+    all_rows: List[Dict[str, Any]],
+    csv_path: Path,
+    partial_csv_path: Path,
+    logger: logging.Logger,
+) -> Callable[[int, FrameType | None], None]:
+    """Create a signal handler that saves results on interrupt."""
+    interrupted = False
+    
+    def signal_handler(signum: int, frame: FrameType | None) -> None:
+        nonlocal interrupted
+        if interrupted:
+            logger.warning("Received second interrupt signal, forcing exit")
+            sys.exit(1)
+        
+        interrupted = True
+        logger.warning(f"Received interrupt signal ({signum}), saving current results...")
+        
+        try:
+            # Save all accumulated results
+            if all_rows:
+                _write_csv(all_rows, csv_path)
+                logger.info(f"Saved {len(all_rows)} rows to {csv_path}")
+            else:
+                # If no results yet, check if partial file exists
+                if partial_csv_path.exists():
+                    logger.info(f"Partial results exist at {partial_csv_path}")
+                else:
+                    logger.warning("No results to save")
+            
+            logger.info("Results saved. Exiting gracefully.")
+        except Exception as e:
+            logger.error(f"Error saving results on interrupt: {e}", exc_info=True)
+        
+        sys.exit(0)
+    
+    return signal_handler
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+
+    # Ensure output directory exists before setting up logging
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Setup logging to both console and file
+    _setup_logging(args.output_dir)
+    logger = logging.getLogger(__name__)
 
     with args.config.open("r") as f:
         config = yaml.safe_load(f)
@@ -223,8 +315,15 @@ def main() -> None:
         logger.warning("CUDA not available, falling back to CPU")
         logger.info(f"Device: {device}")
     
-    args.output_dir.mkdir(parents=True, exist_ok=True)
     all_rows: List[Dict[str, Any]] = []
+    partial_csv_path = args.output_dir / "raw_metrics_partial.csv"
+    csv_path = args.output_dir / "raw_metrics.csv"
+
+    # Setup signal handlers for graceful interruption
+    signal_handler = _create_signal_handler(all_rows, csv_path, partial_csv_path, logger)
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    logger.info("Signal handlers registered for graceful interruption")
 
     # Load baseline model first, run all baseline experiments, then unload
     from models.model_factory import _load_auto_model
@@ -240,6 +339,8 @@ def main() -> None:
         logger.info(f"GPU memory after baseline load - allocated: {memory_allocated:.2f} GB, reserved: {memory_reserved:.2f} GB")
     baseline_wrapper = AutoRegressiveWrapper(baseline_model, baseline_tokenizer)
 
+    total_baseline_configs = len(seq_lengths) * len(batch_sizes)
+    baseline_pbar = tqdm(total=total_baseline_configs, desc="Baseline experiments", unit="config")
     for seq_length in seq_lengths:
         trimmed_prompts = [p[:seq_length] for p in prompts]
         for batch_size in batch_sizes:
@@ -254,6 +355,10 @@ def main() -> None:
                 warmup=warmup,
             )
             all_rows.extend(baseline_rows)
+            # Save incrementally after each configuration
+            _save_results_incremental(baseline_rows, partial_csv_path)
+            baseline_pbar.update(1)
+    baseline_pbar.close()
     
     # Save baseline model/tokenizer for quality metrics, then unload to free memory
     baseline_quality_model = baseline_model
@@ -279,6 +384,8 @@ def main() -> None:
         logger.info(f"GPU memory after target load - allocated: {memory_allocated:.2f} GB, reserved: {memory_reserved:.2f} GB")
     target_wrapper = DiffusionLikeWrapper(target_model, target_tokenizer)
 
+    total_llada_configs = len(seq_lengths) * len(batch_sizes) * len(diffusion_steps)
+    llada_pbar = tqdm(total=total_llada_configs, desc="LLaDA experiments", unit="config")
     for seq_length in seq_lengths:
         trimmed_prompts = [p[:seq_length] for p in prompts]
         for batch_size in batch_sizes:
@@ -294,8 +401,12 @@ def main() -> None:
                     warmup=warmup,
                 )
                 all_rows.extend(llada_rows)
+                # Save incrementally after each configuration
+                _save_results_incremental(llada_rows, partial_csv_path)
+                llada_pbar.update(1)
+    llada_pbar.close()
 
-    csv_path = args.output_dir / "raw_metrics.csv"
+    # Final complete save
     _write_csv(all_rows, csv_path)
 
     # Compute quality metrics (reload baseline if needed, or use cached)
