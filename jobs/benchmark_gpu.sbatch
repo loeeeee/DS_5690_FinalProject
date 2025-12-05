@@ -4,12 +4,10 @@
 #SBATCH --partition=batch_gpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=32G
 #SBATCH --time=04:00:00
 #SBATCH --output=logs/slurm/%x_%j.out
 #SBATCH --error=logs/slurm/%x_%j.err
-#SBATCH --gres=gpu:nvidia_geforce_rtx_2080_ti:1
+#SBATCH --gres=gpu:nvidia_geforce_rtx_2080_ti:4
 
 # Headless benchmarking entrypoint. Assumes environment is built via jobs/environment_setup.sh.
 
