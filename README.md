@@ -14,13 +14,13 @@ Repo layout (scaffold)
 - `results/raw_data/`: metrics CSV/JSON.
 - `results/figures/`: generated plots (matplotlib Agg).
 
-Quick start (to be finalized)
-- Prepare environment: run `jobs/environment_setup.sh` on login node.
-- Submit benchmark: `sbatch jobs/benchmark_gpu.sbatch`.
-- Collect outputs: check `logs/slurm/` for job logs, `results/raw_data/` for metrics, `results/figures/` for plots.
+Quick start (headless)
+- Configure experiments in `config/experiments.yaml` (default LLaMA: `meta-llama/Meta-Llama-3-8B`, LLaDA: `GSAI-ML/LLaDA-8B-Base`).
+- Run locally: `python -m src.main --config config/experiments.yaml --output_dir results/raw_data`.
+- Optional overrides: `--steps 64 --batch_size 4 --max_prompts 16 --compute_bertscore`.
+- Outputs: latency/throughput CSV at `results/raw_data/raw_metrics.csv` and quality metrics JSON at `results/raw_data/quality_metrics.json`.
 
-Next steps
-- Fill config values, implement CLI, metrics, profiling, and report generation.
-- Update docs-vibe and this README after each task per `.clinerules`.
-- Use `src/config/structures.py` for experiment variables/metric specs when
-  wiring CLI args, validation, and reporting (see `docs-vibe/002-dataclass-design.md`).
+Notes
+- Prompts default to Wikitext-103 validation text; supply `--prompt_file` to use custom prompts.
+- Profiling uses CUDA events when available; falls back to CPU timers otherwise.
+- Generation uses BF16 by default; adjust `precision` in `config/experiments.yaml` if required.
