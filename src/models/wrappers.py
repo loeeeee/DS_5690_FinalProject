@@ -6,9 +6,10 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Protocol, Sequence
+from typing import Any, Callable, Dict, List, Protocol, Sequence
 
 import torch
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,87 @@ def _run_with_timeout(func: Any, timeout_seconds: int, *args: Any, **kwargs: Any
     if thread.is_alive():
         logger.error(f"Function call timed out after {timeout_seconds} seconds")
         raise TimeoutError(f"Function call timed out after {timeout_seconds} seconds")
+    
+    if exception_container[0] is not None:
+        raise exception_container[0]
+    
+    return result_container[0]
+
+
+def _run_with_progress(
+    func: Callable[[], Any],
+    timeout_seconds: int,
+    max_tokens: int,
+    device_type: str,
+    desc: str = "Generating",
+) -> Any:
+    """Run a function with a progress bar showing elapsed time.
+    
+    Args:
+        func: Function to execute (no arguments)
+        timeout_seconds: Maximum time to wait
+        max_tokens: Maximum tokens to generate (for display purposes)
+        device_type: Device type ("cpu" or "cuda") for progress bar positioning
+        desc: Description for progress bar
+    """
+    result_container: list[Any] = [None]
+    exception_container: list[Exception | None] = [None]
+    progress_stop = threading.Event()
+    start_time = time.time()
+    
+    # Create progress bar - use position 2 for generation progress (below batch progress)
+    # Use a time-based progress bar since we can't track actual token generation progress
+    pbar = tqdm(
+        total=100,  # Use 100 as total for percentage display
+        desc=desc,
+        unit="%",
+        position=2,
+        leave=False,
+        bar_format="{desc}: {elapsed} elapsed | {percentage:3.0f}%",
+        ncols=80,
+    )
+    
+    def update_progress() -> None:
+        """Update progress bar with elapsed time."""
+        while not progress_stop.is_set():
+            elapsed = time.time() - start_time
+            # Show progress as percentage of timeout (capped at 100%)
+            progress_pct = min(int((elapsed / timeout_seconds) * 100), 100)
+            pbar.n = progress_pct
+            pbar.refresh()
+            time.sleep(1.0)  # Update every second
+    
+    def target() -> None:
+        try:
+            result_container[0] = func()
+        except Exception as e:
+            exception_container[0] = e
+    
+    # Start generation thread
+    gen_thread = threading.Thread(target=target, daemon=True)
+    gen_thread.start()
+    
+    # Start progress update thread
+    progress_thread = threading.Thread(target=update_progress, daemon=True)
+    progress_thread.start()
+    
+    # Wait for completion or timeout
+    gen_thread.join(timeout=timeout_seconds)
+    
+    # Stop progress updates
+    progress_stop.set()
+    progress_thread.join(timeout=1.0)
+    
+    # Check if generation completed successfully
+    if gen_thread.is_alive():
+        pbar.close()
+        logger.error(f"Function call timed out after {timeout_seconds} seconds")
+        raise TimeoutError(f"Function call timed out after {timeout_seconds} seconds")
+    
+    # Generation completed - show 100%
+    pbar.n = 100
+    pbar.refresh()
+    pbar.close()
     
     if exception_container[0] is not None:
         raise exception_container[0]
@@ -72,11 +154,11 @@ class AutoRegressiveWrapper(ModelWrapper):
         steps: int | None = None,
         max_new_tokens: int | None = None,
     ) -> GenerationBatchResult:
-        logger.info(f"AutoRegressiveWrapper.generate_batch: Starting - prompts: {len(prompts)}, max_new_tokens: {max_new_tokens}")
+        logger.debug(f"AutoRegressiveWrapper.generate_batch: Starting - prompts: {len(prompts)}, max_new_tokens: {max_new_tokens}")
         device = next(self.model.parameters()).device
-        logger.info(f"AutoRegressiveWrapper.generate_batch: Model device: {device}")
+        logger.debug(f"AutoRegressiveWrapper.generate_batch: Model device: {device}")
         
-        logger.info("AutoRegressiveWrapper.generate_batch: Tokenizing prompts")
+        logger.debug("AutoRegressiveWrapper.generate_batch: Tokenizing prompts")
         tokenizer_outputs = self.tokenizer(
             list(prompts),
             return_tensors="pt",
@@ -84,17 +166,17 @@ class AutoRegressiveWrapper(ModelWrapper):
             truncation=True,
             max_length=2048,
         )
-        logger.info(f"AutoRegressiveWrapper.generate_batch: Tokenization complete - input_ids shape: {tokenizer_outputs['input_ids'].shape}")
+        logger.debug(f"AutoRegressiveWrapper.generate_batch: Tokenization complete - input_ids shape: {tokenizer_outputs['input_ids'].shape}")
         
         # Move all tensors in tokenizer_outputs to the model's device
-        logger.info(f"AutoRegressiveWrapper.generate_batch: Moving tensors to device: {device}")
+        logger.debug(f"AutoRegressiveWrapper.generate_batch: Moving tensors to device: {device}")
         tokenizer_outputs = {k: v.to(device) for k, v in tokenizer_outputs.items()}
-        logger.info("AutoRegressiveWrapper.generate_batch: Tensors moved to device")
+        logger.debug("AutoRegressiveWrapper.generate_batch: Tensors moved to device")
         
         max_tokens = max_new_tokens or 128
-        logger.info(f"AutoRegressiveWrapper.generate_batch: Starting model.generate() with max_new_tokens={max_tokens}")
+        logger.debug(f"AutoRegressiveWrapper.generate_batch: Starting model.generate() with max_new_tokens={max_tokens}")
         
-        # On CPU, generation can be extremely slow. Add timeout and periodic logging.
+        # On CPU, generation can be extremely slow. Add timeout and progress bar.
         # For CPU, allow up to 30 minutes per generation (very conservative)
         timeout_seconds = 1800 if device.type == "cpu" else 300
         
@@ -110,48 +192,35 @@ class AutoRegressiveWrapper(ModelWrapper):
                 )
         
         start_time = time.time()
-        logger.info(f"AutoRegressiveWrapper.generate_batch: Starting generation (timeout: {timeout_seconds}s)")
+        logger.debug(f"AutoRegressiveWrapper.generate_batch: Starting generation (timeout: {timeout_seconds}s)")
         
         try:
-            # Start a heartbeat thread to log progress
-            heartbeat_stop = threading.Event()
-            
-            def heartbeat() -> None:
-                elapsed = 0
-                while not heartbeat_stop.is_set():
-                    time.sleep(30)  # Log every 30 seconds
-                    if heartbeat_stop.is_set():
-                        break
-                    elapsed += 30
-                    logger.info(f"AutoRegressiveWrapper.generate_batch: Still generating... ({elapsed}s elapsed)")
-            
-            heartbeat_thread = threading.Thread(target=heartbeat, daemon=True)
-            heartbeat_thread.start()
-            
-            try:
-                generated = _run_with_timeout(_generate, timeout_seconds)
-            finally:
-                heartbeat_stop.set()
-                heartbeat_thread.join(timeout=1.0)
+            generated = _run_with_progress(
+                _generate,
+                timeout_seconds,
+                max_tokens,
+                device.type,
+                desc="Generating tokens",
+            )
             
             elapsed_time = time.time() - start_time
-            logger.info(f"AutoRegressiveWrapper.generate_batch: model.generate() completed in {elapsed_time:.2f}s - output shape: {generated.shape}")
+            logger.debug(f"AutoRegressiveWrapper.generate_batch: model.generate() completed in {elapsed_time:.2f}s - output shape: {generated.shape}")
         except TimeoutError as e:
             elapsed_time = time.time() - start_time
             logger.error(f"AutoRegressiveWrapper.generate_batch: Generation timed out after {elapsed_time:.2f}s: {e}")
             raise
         
-        logger.info("AutoRegressiveWrapper.generate_batch: Decoding generated tokens")
+        logger.debug("AutoRegressiveWrapper.generate_batch: Decoding generated tokens")
         texts = self.tokenizer.batch_decode(generated, skip_special_tokens=True)
-        logger.info(f"AutoRegressiveWrapper.generate_batch: Decoding complete - {len(texts)} texts")
+        logger.debug(f"AutoRegressiveWrapper.generate_batch: Decoding complete - {len(texts)} texts")
         
-        logger.info("AutoRegressiveWrapper.generate_batch: Computing token counts")
+        logger.debug("AutoRegressiveWrapper.generate_batch: Computing token counts")
         token_counts: List[int] = []
         for out_ids, in_ids in zip(generated, tokenizer_outputs["input_ids"]):
             token_counts.append(len(out_ids) - len(in_ids))
-        logger.info(f"AutoRegressiveWrapper.generate_batch: Token counts: {token_counts}")
+        logger.debug(f"AutoRegressiveWrapper.generate_batch: Token counts: {token_counts}")
         
-        logger.info("AutoRegressiveWrapper.generate_batch: Returning result")
+        logger.debug("AutoRegressiveWrapper.generate_batch: Returning result")
         return type(
             "GenerationBatchResult",
             (),
@@ -168,11 +237,11 @@ class DiffusionLikeWrapper(ModelWrapper):
         steps: int | None = None,
         max_new_tokens: int | None = None,
     ) -> GenerationBatchResult:
-        logger.info(f"DiffusionLikeWrapper.generate_batch: Starting - prompts: {len(prompts)}, steps: {steps}, max_new_tokens: {max_new_tokens}")
+        logger.debug(f"DiffusionLikeWrapper.generate_batch: Starting - prompts: {len(prompts)}, steps: {steps}, max_new_tokens: {max_new_tokens}")
         device = next(self.model.parameters()).device
-        logger.info(f"DiffusionLikeWrapper.generate_batch: Model device: {device}")
+        logger.debug(f"DiffusionLikeWrapper.generate_batch: Model device: {device}")
         
-        logger.info("DiffusionLikeWrapper.generate_batch: Tokenizing prompts")
+        logger.debug("DiffusionLikeWrapper.generate_batch: Tokenizing prompts")
         tokenizer_outputs = self.tokenizer(
             list(prompts),
             return_tensors="pt",
@@ -180,25 +249,26 @@ class DiffusionLikeWrapper(ModelWrapper):
             truncation=True,
             max_length=2048,
         )
-        logger.info(f"DiffusionLikeWrapper.generate_batch: Tokenization complete - input_ids shape: {tokenizer_outputs['input_ids'].shape}")
+        logger.debug(f"DiffusionLikeWrapper.generate_batch: Tokenization complete - input_ids shape: {tokenizer_outputs['input_ids'].shape}")
         
         # Move all tensors in tokenizer_outputs to the model's device
-        logger.info(f"DiffusionLikeWrapper.generate_batch: Moving tensors to device: {device}")
+        logger.debug(f"DiffusionLikeWrapper.generate_batch: Moving tensors to device: {device}")
         tokenizer_outputs = {k: v.to(device) for k, v in tokenizer_outputs.items()}
-        logger.info("DiffusionLikeWrapper.generate_batch: Tensors moved to device")
+        logger.debug("DiffusionLikeWrapper.generate_batch: Tensors moved to device")
         
         generation_kwargs: Dict[str, Any] = {
             "max_new_tokens": max_new_tokens or 128,
             "use_cache": False,  # LLaDA doesn't support KV cache
         }
-        logger.info(f"DiffusionLikeWrapper.generate_batch: Generation kwargs: {generation_kwargs}")
+        logger.debug(f"DiffusionLikeWrapper.generate_batch: Generation kwargs: {generation_kwargs}")
         
         # TODO: LLaDA step control - num_inference_steps is not accepted by this model's generate()
         # Steps may need to be controlled via generation_config or model config
         # For now, ignore steps parameter to allow benchmark to run
-        logger.info("DiffusionLikeWrapper.generate_batch: Starting model.generate()")
+        max_tokens = max_new_tokens or 128
+        logger.debug("DiffusionLikeWrapper.generate_batch: Starting model.generate()")
         
-        # On CPU, generation can be extremely slow. Add timeout and periodic logging.
+        # On CPU, generation can be extremely slow. Add timeout and progress bar.
         timeout_seconds = 1800 if device.type == "cpu" else 300
         
         def _generate() -> Any:
@@ -209,53 +279,40 @@ class DiffusionLikeWrapper(ModelWrapper):
                 )
         
         start_time = time.time()
-        logger.info(f"DiffusionLikeWrapper.generate_batch: Starting generation (timeout: {timeout_seconds}s)")
+        logger.debug(f"DiffusionLikeWrapper.generate_batch: Starting generation (timeout: {timeout_seconds}s)")
         
         try:
-            # Start a heartbeat thread to log progress
-            heartbeat_stop = threading.Event()
-            
-            def heartbeat() -> None:
-                elapsed = 0
-                while not heartbeat_stop.is_set():
-                    time.sleep(30)  # Log every 30 seconds
-                    if heartbeat_stop.is_set():
-                        break
-                    elapsed += 30
-                    logger.info(f"DiffusionLikeWrapper.generate_batch: Still generating... ({elapsed}s elapsed)")
-            
-            heartbeat_thread = threading.Thread(target=heartbeat, daemon=True)
-            heartbeat_thread.start()
-            
-            try:
-                generated = _run_with_timeout(_generate, timeout_seconds)
-            finally:
-                heartbeat_stop.set()
-                heartbeat_thread.join(timeout=1.0)
+            generated = _run_with_progress(
+                _generate,
+                timeout_seconds,
+                max_tokens,
+                device.type,
+                desc="Generating tokens",
+            )
             
             elapsed_time = time.time() - start_time
-            logger.info(f"DiffusionLikeWrapper.generate_batch: model.generate() completed in {elapsed_time:.2f}s - output shape: {generated.shape}")
+            logger.debug(f"DiffusionLikeWrapper.generate_batch: model.generate() completed in {elapsed_time:.2f}s - output shape: {generated.shape}")
         except TimeoutError as e:
             elapsed_time = time.time() - start_time
             logger.error(f"DiffusionLikeWrapper.generate_batch: Generation timed out after {elapsed_time:.2f}s: {e}")
             raise
         
-        logger.info("DiffusionLikeWrapper.generate_batch: Decoding generated tokens")
+        logger.debug("DiffusionLikeWrapper.generate_batch: Decoding generated tokens")
         texts = self.tokenizer.batch_decode(generated, skip_special_tokens=True)
-        logger.info(f"DiffusionLikeWrapper.generate_batch: Decoding complete - {len(texts)} texts")
+        logger.debug(f"DiffusionLikeWrapper.generate_batch: Decoding complete - {len(texts)} texts")
         
-        logger.info("DiffusionLikeWrapper.generate_batch: Computing token counts")
+        logger.debug("DiffusionLikeWrapper.generate_batch: Computing token counts")
         token_counts: List[int] = []
         for out_ids, in_ids in zip(generated, tokenizer_outputs["input_ids"]):
             token_counts.append(len(out_ids) - len(in_ids))
-        logger.info(f"DiffusionLikeWrapper.generate_batch: Token counts: {token_counts}")
+        logger.debug(f"DiffusionLikeWrapper.generate_batch: Token counts: {token_counts}")
         
-        logger.info("DiffusionLikeWrapper.generate_batch: Creating result object")
+        logger.debug("DiffusionLikeWrapper.generate_batch: Creating result object")
         result = type(
             "GenerationBatchResult",
             (),
             {"texts": texts, "token_counts": token_counts, "timings": {}},
         )()
-        logger.info("DiffusionLikeWrapper.generate_batch: Returning result")
+        logger.debug("DiffusionLikeWrapper.generate_batch: Returning result")
         return result
 

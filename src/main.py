@@ -9,6 +9,7 @@ import logging
 import math
 import signal
 import sys
+import time
 from pathlib import Path
 from types import FrameType
 from typing import Any, Callable, Dict, Iterable, List
@@ -133,6 +134,16 @@ def _save_results_incremental(rows: List[Dict[str, Any]], output_path: Path) -> 
         writer.writerows(rows)
 
 
+def _format_time(seconds: float) -> str:
+    """Format time in seconds to human-readable string."""
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    elif seconds < 3600:
+        return f"{seconds/60:.1f}m"
+    else:
+        return f"{seconds/3600:.1f}h"
+
+
 def _summarize(rows: List[Dict[str, Any]]) -> str:
     if not rows:
         return "no rows recorded"
@@ -170,38 +181,51 @@ def _run_model(
 
     batches = list(_batched(prompts, batch_size))
     logger.info(f"Running benchmark for {name}: {len(batches)} batches")
+    
+    batch_start_time = time.time()
+    batch_times: List[float] = []
+    
     batch_pbar = tqdm(
         enumerate(batches),
         total=len(batches),
         desc=f"Batches {name}",
         unit="batch",
         leave=False,
+        position=1,
     )
     for batch_idx, batch in batch_pbar:
+        batch_iter_start = time.time()
         batch_pbar.set_postfix({
             "batch": f"{batch_idx+1}/{len(batches)}",
             "size": len(batch),
             "steps": steps or "N/A"
         })
-        logger.info(f"Processing batch {batch_idx+1}/{len(batches)} for {name}")
-        logger.info(f"Batch {batch_idx+1} details: batch_size={len(batch)}, steps={steps}, max_new_tokens={max_new_tokens}")
+        logger.debug(f"Processing batch {batch_idx+1}/{len(batches)} for {name}")
+        logger.debug(f"Batch {batch_idx+1} details: batch_size={len(batch)}, steps={steps}, max_new_tokens={max_new_tokens}")
         result: GenerationBatchResult
         try:
-            logger.info(f"Batch {batch_idx+1}: About to call profile_generation")
+            logger.debug(f"Batch {batch_idx+1}: About to call profile_generation")
             result, profile = profile_generation(
                 wrapper.generate_batch,
                 batch,
                 steps=steps,
                 max_new_tokens=max_new_tokens,
             )
-            logger.info(f"Batch {batch_idx+1}: profile_generation completed successfully")
+            logger.debug(f"Batch {batch_idx+1}: profile_generation completed successfully")
         except Exception as e:
             logger.error(f"Batch {batch_idx+1} failed for {name}: {e}", exc_info=True)
             raise
-        logger.info(f"Batch {batch_idx+1}: Processing results - token_counts: {result.token_counts}")
+        logger.debug(f"Batch {batch_idx+1}: Processing results - token_counts: {result.token_counts}")
         total_tokens = sum(result.token_counts)
         throughput = total_tokens / (profile["latency_ms"] / 1000.0) if profile["latency_ms"] > 0 else 0.0
-        logger.info(f"Batch {batch_idx+1}: Computed metrics - total_tokens={total_tokens}, throughput={throughput:.2f} tok/s")
+        logger.debug(f"Batch {batch_idx+1}: Computed metrics - total_tokens={total_tokens}, throughput={throughput:.2f} tok/s")
+        
+        # Calculate batch time and estimate remaining time
+        batch_time = time.time() - batch_iter_start
+        batch_times.append(batch_time)
+        avg_batch_time = sum(batch_times) / len(batch_times)
+        remaining_batches = len(batches) - (batch_idx + 1)
+        estimated_remaining = avg_batch_time * remaining_batches
         
         # Print generation snippets to console
         print(f"\n[{name}] Batch {batch_idx+1}/{len(batches)} - Generated snippets:")
@@ -236,14 +260,19 @@ def _run_model(
                 "itl_ms": profile.get("itl_ms", math.nan),
             }
         )
+        
+        # Update progress bar with enhanced metrics
         batch_pbar.set_postfix({
             "batch": f"{batch_idx+1}/{len(batches)}",
-            "latency": f"{profile['latency_ms']:.0f}ms",
-            "tokens": total_tokens
+            "latency": f"{profile['latency_ms']/1000:.1f}s",
+            "tokens": total_tokens,
+            "tps": f"{throughput:.2f}",
+            "ETA": _format_time(estimated_remaining) if remaining_batches > 0 else "done"
         })
-        logger.info(f"Batch {batch_idx+1}: Results appended to rows, moving to next batch")
+        logger.debug(f"Batch {batch_idx+1}: Results appended to rows, moving to next batch")
     batch_pbar.close()
-    logger.info(f"Completed all {len(batches)} batches for {name}")
+    total_time = time.time() - batch_start_time
+    logger.info(f"Completed all {len(batches)} batches for {name} in {_format_time(total_time)}")
     return rows
 
 
