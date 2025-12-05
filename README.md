@@ -22,3 +22,5 @@ Quick start (to be finalized)
 Next steps
 - Fill config values, implement CLI, metrics, profiling, and report generation.
 - Update docs-vibe and this README after each task per `.clinerules`.
+- Use `src/config/structures.py` for experiment variables/metric specs when
+  wiring CLI args, validation, and reporting (see `docs-vibe/002-dataclass-design.md`).
