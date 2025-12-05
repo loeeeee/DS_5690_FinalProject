@@ -29,6 +29,11 @@ Local dev (ROCm, nix-shell)
 - Run benchmark locally inside shell: `python -m src.main --config config/experiments.yaml --output_dir results/raw_data`
 - Environment notes: `PYTORCH_HIP_ARCH=gfx1100` and `HSA_OVERRIDE_GFX_VERSION=11.0.0` are set for RX 7900 XT; torchWithRocm uses ROCm 6.4.
 
+Pre-download models and data
+- From inside `nix-shell`, fetch caches ahead of time:  
+  `python scripts/download_assets.py --config config/experiments.yaml`  
+  Add `--hf-token $HF_TOKEN` for gated LLaMA 3, `--model-cache-dir /fast/hf` or `--dataset-cache-dir /fast/hf_datasets` to steer cache locations. Use `--extra-model-id` to pull additional repos. `--local-files-only` will only validate existing cache.
+
 Quick start (headless CUDA / SLURM)
 - Configure experiments in `config/experiments.yaml` (default LLaMA: `meta-llama/Meta-Llama-3-8B`, LLaDA: `GSAI-ML/LLaDA-8B-Base`).
 - Run on cluster: `sbatch jobs/benchmark_gpu.sbatch`

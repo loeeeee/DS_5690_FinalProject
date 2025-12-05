@@ -4,13 +4,16 @@
 }:
 
 let
-  rocmPkgs = pkgs.rocmPackages_6_4;
+  rocmPkgs = pkgs.rocmPackages;
   pythonEnv = pkgs.python313.withPackages (ps:
     let
-      torch = ps.torchWithRocm.override { rocmPackages = rocmPkgs; };
+      t = ps.torchWithRocm.override { rocmPackages = rocmPkgs; };
     in
     with ps; [
       pip
+      pyyaml
+      datasets
+      evaluate
       requests
       # Jupyter
       jupyter
@@ -24,16 +27,13 @@ let
       numpy
       pandas
       scikit-learn
-      # NLP
-      spacy
-      spacy-models.en_core_web_sm
-      # DL
-      torch
-      (torchaudio.override { inherit torch; })
-      (torchvision.override { inherit torch; })
-      # Transformers stack
-      transformers
-      accelerate
+      sentencepiece
+      tokenizers
+      safetensors
+      huggingface-hub
+      (transformers.override { torch = t; })
+      (accelerate.override { torch = t; })
+      t
     ]);
 in
 pkgs.mkShell {
