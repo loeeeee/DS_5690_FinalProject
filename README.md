@@ -14,9 +14,24 @@ Repo layout (scaffold)
 - `results/raw_data/`: metrics CSV/JSON.
 - `results/figures/`: generated plots (matplotlib Agg).
 
-Quick start (headless)
+Local dev (ROCm, nix-shell)
+- Enter shell (Python 3.13, ROCm 6.4, RX 7900 XT): `nix-shell nix-shell.nix`
+- Verify ROCm torch:
+  - `python - <<'PY'`
+  - `import torch, platform`
+  - `print("torch", torch.__version__)`
+  - `print("hip version", torch.version.hip)`
+  - `print("cuda available", torch.cuda.is_available())`
+  - `print("device", torch.cuda.get_device_name(0))`
+  - `print("arch", torch.cuda.get_device_capability())`
+  - `print("platform", platform.platform())`
+  - `PY`
+- Run benchmark locally inside shell: `python -m src.main --config config/experiments.yaml --output_dir results/raw_data`
+- Environment notes: `PYTORCH_HIP_ARCH=gfx1100` and `HSA_OVERRIDE_GFX_VERSION=11.0.0` are set for RX 7900 XT; torchWithRocm uses ROCm 6.4.
+
+Quick start (headless CUDA / SLURM)
 - Configure experiments in `config/experiments.yaml` (default LLaMA: `meta-llama/Meta-Llama-3-8B`, LLaDA: `GSAI-ML/LLaDA-8B-Base`).
-- Run locally: `python -m src.main --config config/experiments.yaml --output_dir results/raw_data`.
+- Run on cluster: `sbatch jobs/benchmark_gpu.sbatch`
 - Optional overrides: `--steps 64 --batch_size 4 --max_prompts 16 --compute_bertscore`.
 - Outputs: latency/throughput CSV at `results/raw_data/raw_metrics.csv` and quality metrics JSON at `results/raw_data/quality_metrics.json`.
 
