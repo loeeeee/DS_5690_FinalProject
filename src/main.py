@@ -155,7 +155,7 @@ def _run_model(
     warmup_prompts = prompts[: min(len(prompts), max(batch_size, 1))]
     logger.info(f"Running warmup for {name}: {warmup} iterations")
     if warmup > 1:
-        warmup_iterable = tqdm(range(warmup), desc=f"Warmup {name}", leave=False)
+        warmup_iterable = tqdm(range(warmup), desc=f"Warmup {name}", unit="iter", leave=False)
     else:
         warmup_iterable = range(warmup)
     for warmup_idx in warmup_iterable:
@@ -170,7 +170,19 @@ def _run_model(
 
     batches = list(_batched(prompts, batch_size))
     logger.info(f"Running benchmark for {name}: {len(batches)} batches")
-    for batch_idx, batch in enumerate(tqdm(batches, desc=f"Processing batches {name}", leave=False)):
+    batch_pbar = tqdm(
+        enumerate(batches),
+        total=len(batches),
+        desc=f"Batches {name}",
+        unit="batch",
+        leave=False,
+    )
+    for batch_idx, batch in batch_pbar:
+        batch_pbar.set_postfix({
+            "batch": f"{batch_idx+1}/{len(batches)}",
+            "size": len(batch),
+            "steps": steps or "N/A"
+        })
         logger.info(f"Processing batch {batch_idx+1}/{len(batches)} for {name}")
         logger.info(f"Batch {batch_idx+1} details: batch_size={len(batch)}, steps={steps}, max_new_tokens={max_new_tokens}")
         result: GenerationBatchResult
@@ -190,6 +202,25 @@ def _run_model(
         total_tokens = sum(result.token_counts)
         throughput = total_tokens / (profile["latency_ms"] / 1000.0) if profile["latency_ms"] > 0 else 0.0
         logger.info(f"Batch {batch_idx+1}: Computed metrics - total_tokens={total_tokens}, throughput={throughput:.2f} tok/s")
+        
+        # Print generation snippets to console
+        print(f"\n[{name}] Batch {batch_idx+1}/{len(batches)} - Generated snippets:")
+        for i, (prompt, generated_text) in enumerate(zip(batch, result.texts)):
+            # Show first 100 chars of prompt and first 200 chars of generated text
+            prompt_snippet = prompt[:100] + "..." if len(prompt) > 100 else prompt
+            generated_snippet = generated_text[:200] + "..." if len(generated_text) > 200 else generated_text
+            # Remove the prompt from generated text to show only new content
+            if generated_text.startswith(prompt):
+                new_content = generated_text[len(prompt):].strip()
+                new_content_snippet = new_content[:200] + "..." if len(new_content) > 200 else new_content
+            else:
+                new_content_snippet = generated_snippet
+            print(f"  Sample {i+1}:")
+            print(f"    Prompt: {prompt_snippet}")
+            print(f"    Generated: {new_content_snippet}")
+            print(f"    Tokens: {result.token_counts[i]}")
+        print()
+        
         rows.append(
             {
                 "model": name,
@@ -205,7 +236,13 @@ def _run_model(
                 "itl_ms": profile.get("itl_ms", math.nan),
             }
         )
+        batch_pbar.set_postfix({
+            "batch": f"{batch_idx+1}/{len(batches)}",
+            "latency": f"{profile['latency_ms']:.0f}ms",
+            "tokens": total_tokens
+        })
         logger.info(f"Batch {batch_idx+1}: Results appended to rows, moving to next batch")
+    batch_pbar.close()
     logger.info(f"Completed all {len(batches)} batches for {name}")
     return rows
 
@@ -335,6 +372,12 @@ def main() -> None:
     # Load baseline model first, run all baseline experiments, then unload
     from models.model_factory import _load_auto_model
     from models.wrappers import AutoRegressiveWrapper
+    
+    # Overall progress tracking
+    main_phases = ["Loading baseline model", "Baseline experiments", "Loading LLaDA model", "LLaDA experiments", "Quality metrics"]
+    main_pbar = tqdm(main_phases, desc="Overall progress", unit="phase", position=0, leave=True)
+    main_pbar.set_description("Loading baseline model")
+    
     logger.info(f"Loading baseline model: {baseline_id}")
     baseline_model, baseline_tokenizer = _load_auto_model(baseline_id, device, precision)
     # Verify model is on correct device
@@ -345,9 +388,11 @@ def main() -> None:
         memory_reserved = torch.cuda.memory_reserved(0) / (1024**3)
         logger.info(f"GPU memory after baseline load - allocated: {memory_allocated:.2f} GB, reserved: {memory_reserved:.2f} GB")
     baseline_wrapper = AutoRegressiveWrapper(baseline_model, baseline_tokenizer)
+    main_pbar.update(1)
+    main_pbar.set_description("Baseline experiments")
 
     total_baseline_configs = len(seq_lengths) * len(batch_sizes)
-    baseline_pbar = tqdm(total=total_baseline_configs, desc="Baseline experiments", unit="config")
+    baseline_pbar = tqdm(total=total_baseline_configs, desc="Baseline experiments", unit="config", position=1, leave=False)
     for seq_length in seq_lengths:
         trimmed_prompts = [p[:seq_length] for p in prompts]
         for batch_size in batch_sizes:
@@ -366,6 +411,8 @@ def main() -> None:
             _save_results_incremental(baseline_rows, partial_csv_path)
             baseline_pbar.update(1)
     baseline_pbar.close()
+    main_pbar.update(1)
+    main_pbar.set_description("Loading LLaDA model")
     
     # Save baseline model/tokenizer for quality metrics, then unload to free memory
     baseline_quality_model = baseline_model
@@ -390,9 +437,11 @@ def main() -> None:
         memory_reserved = torch.cuda.memory_reserved(0) / (1024**3)
         logger.info(f"GPU memory after target load - allocated: {memory_allocated:.2f} GB, reserved: {memory_reserved:.2f} GB")
     target_wrapper = DiffusionLikeWrapper(target_model, target_tokenizer)
+    main_pbar.update(1)
+    main_pbar.set_description("LLaDA experiments")
 
     total_llada_configs = len(seq_lengths) * len(batch_sizes) * len(diffusion_steps)
-    llada_pbar = tqdm(total=total_llada_configs, desc="LLaDA experiments", unit="config")
+    llada_pbar = tqdm(total=total_llada_configs, desc="LLaDA experiments", unit="config", position=1, leave=False)
     for seq_length in seq_lengths:
         trimmed_prompts = [p[:seq_length] for p in prompts]
         for batch_size in batch_sizes:
@@ -412,6 +461,8 @@ def main() -> None:
                 _save_results_incremental(llada_rows, partial_csv_path)
                 llada_pbar.update(1)
     llada_pbar.close()
+    main_pbar.update(1)
+    main_pbar.set_description("Quality metrics")
 
     # Final complete save
     _write_csv(all_rows, csv_path)
@@ -420,24 +471,33 @@ def main() -> None:
     metric_rows: Dict[str, Dict[str, float]] = {}
     
     # Baseline metrics
-    metrics = compute_metrics(
-        model=baseline_quality_model,
-        tokenizer=baseline_tokenizer,
-        texts=prompts,
-        max_length=max_new_tokens,
-        compute_bertscore=args.compute_bertscore,
-    )
-    metric_rows["baseline"] = metrics
+    with tqdm(total=2, desc="Computing quality metrics", unit="model", position=1, leave=False) as metrics_pbar:
+        metrics_pbar.set_description("Baseline quality metrics")
+        metrics = compute_metrics(
+            model=baseline_quality_model,
+            tokenizer=baseline_tokenizer,
+            texts=prompts,
+            max_length=max_new_tokens,
+            compute_bertscore=args.compute_bertscore,
+        )
+        metric_rows["baseline"] = metrics
+        metrics_pbar.update(1)
+        
+        # LLaDA metrics
+        metrics_pbar.set_description("LLaDA quality metrics")
+        metrics = compute_metrics(
+            model=target_model,
+            tokenizer=target_tokenizer,
+            texts=prompts,
+            max_length=max_new_tokens,
+            compute_bertscore=args.compute_bertscore,
+        )
+        metric_rows["llada"] = metrics
+        metrics_pbar.update(1)
     
-    # LLaDA metrics
-    metrics = compute_metrics(
-        model=target_model,
-        tokenizer=target_tokenizer,
-        texts=prompts,
-        max_length=max_new_tokens,
-        compute_bertscore=args.compute_bertscore,
-    )
-    metric_rows["llada"] = metrics
+    main_pbar.update(1)
+    main_pbar.set_description("Complete")
+    main_pbar.close()
 
     metrics_path = args.output_dir / "quality_metrics.json"
     metrics_path.write_text(json.dumps(metric_rows, indent=2))

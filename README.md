@@ -160,3 +160,17 @@ The preliminary perplexity of \>100k at 16 steps suggests the "useful" step coun
     nix-shell shell.nix
     python -m src.main --config config/experiments_mini.yaml --output_dir results/raw_data
     ```
+
+## References
+
+```bibtex
+@misc{nie2025largelanguagediffusionmodels,
+      title={Large Language Diffusion Models}, 
+      author={Shen Nie and Fengqi Zhu and Zebin You and Xiaolu Zhang and Jingyang Ou and Jun Hu and Jun Zhou and Yankai Lin and Ji-Rong Wen and Chongxuan Li},
+      year={2025},
+      eprint={2502.09992},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      url={https://arxiv.org/abs/2502.09992}, 
+}
+```
