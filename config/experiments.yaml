@@ -13,4 +13,5 @@ dataset:
   name: "wikitext"
   config: "wikitext-103-v1"
   split: "validation"
+  dataset_size: "medium"
   max_prompts: 32

@@ -33,15 +33,52 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--steps", type=int, help="Override diffusion steps for LLaDA")
     parser.add_argument("--batch_size", type=int, help="Override batch size for sweep/debug")
     parser.add_argument("--prompt_file", type=Path, help="Optional prompt file for reproducible inputs")
-    parser.add_argument("--max_prompts", type=int, default=32, help="Limit prompts for quick runs")
+    parser.add_argument("--max_prompts", type=int, default=None, help="Override prompt count (takes precedence over config dataset_size)")
     parser.add_argument("--compute_bertscore", action="store_true", help="Also compute BERTScore (slower)")
     return parser
 
 
-def _load_prompts(prompt_file: Path | None, max_prompts: int, seq_length: int) -> List[str]:
+def _get_prompt_count_from_size(dataset_size: str | None) -> int:
+    """Map dataset size preset to prompt count."""
+    size_map = {
+        "small": 8,
+        "medium": 32,
+        "large": 128,
+    }
+    if dataset_size is None:
+        return 32  # Default to medium
+    dataset_size_lower = dataset_size.lower()
+    if dataset_size_lower not in size_map:
+        logger.warning(f"Unknown dataset_size '{dataset_size}', defaulting to medium (32 prompts)")
+        return 32
+    return size_map[dataset_size_lower]
+
+
+def _load_prompts(
+    prompt_file: Path | None,
+    max_prompts: int | None,
+    seq_length: int,
+    dataset_size: str | None = None,
+) -> List[str]:
+    """Load prompts from file or dataset.
+    
+    Args:
+        prompt_file: Optional file path to load prompts from
+        max_prompts: CLI override for prompt count (takes precedence over dataset_size)
+        seq_length: Maximum sequence length to truncate prompts
+        dataset_size: Size preset ("small", "medium", "large") from config
+    """
+    # Determine prompt count: CLI override takes precedence
+    if max_prompts is not None:
+        target_count = max_prompts
+        logger.info(f"Using CLI override: {target_count} prompts")
+    else:
+        target_count = _get_prompt_count_from_size(dataset_size)
+        logger.info(f"Using dataset_size '{dataset_size}': {target_count} prompts")
+    
     if prompt_file:
         lines = prompt_file.read_text().strip().splitlines()
-        return lines[:max_prompts]
+        return lines[:target_count]
     dataset = load_dataset("wikitext", "wikitext-103-v1", split="validation")
     prompts: List[str] = []
     for row in dataset:
@@ -49,7 +86,7 @@ def _load_prompts(prompt_file: Path | None, max_prompts: int, seq_length: int) -
         if not text:
             continue
         prompts.append(text[:seq_length])
-        if len(prompts) >= max_prompts:
+        if len(prompts) >= target_count:
             break
     return prompts
 
@@ -165,7 +202,9 @@ def main() -> None:
     if args.steps:
         diffusion_steps = [args.steps]
 
-    prompts = _load_prompts(args.prompt_file, args.max_prompts, max(seq_lengths))
+    dataset_config = config.get("dataset", {})
+    dataset_size = dataset_config.get("dataset_size")
+    prompts = _load_prompts(args.prompt_file, args.max_prompts, max(seq_lengths), dataset_size)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     precision = experiment.get("precision", "bfloat16")

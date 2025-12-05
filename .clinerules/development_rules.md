@@ -4,7 +4,7 @@ Keep project simple.
 
 ## Environment Management
 
-Expect python 3.13 and above.
+Expect python 3.12 and above.
 
 The development environment is NixOS.
 
