@@ -49,6 +49,15 @@ pkgs.mkShell {
     export PYTORCH_HIP_ARCH=gfx1100
     export HSA_OVERRIDE_GFX_VERSION=11.0.0
     export ROCM_PATH=${rocmPkgs.clr}
+    if [ -f .env ]; then
+      set -a
+      # shellcheck disable=SC1091
+      source .env
+      set +a
+      echo ".env loaded into environment."
+    else
+      echo "No .env found; skipping environment variable load."
+    fi
     echo "ROCm shell active (ROCm 6.4, gfx1100). Run: python - <<'PY' ... to verify torch."
   '';
 }
