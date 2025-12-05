@@ -46,9 +46,9 @@ pkgs.mkShell {
   ];
 
   shellHook = ''
-    export PYTORCH_HIP_ARCH=gfx1100
-    export HSA_OVERRIDE_GFX_VERSION=11.0.0
-    export ROCM_PATH=${rocmPkgs.clr}
+    # export PYTORCH_HIP_ARCH=gfx1100
+    # export HSA_OVERRIDE_GFX_VERSION=11.0.0
+    # export ROCM_PATH=${rocmPkgs.clr}
     if [ -f .env ]; then
       set -a
       # shellcheck disable=SC1091

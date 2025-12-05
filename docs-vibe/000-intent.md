@@ -19,3 +19,4 @@ Planned artifacts (scaffolded here, to be filled in later):
 - config/experiments.yaml for sweeps.
 - results/* for raw data and figures; logs/slurm for job outputs.
 
+

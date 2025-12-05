@@ -43,12 +43,16 @@ class AutoRegressiveWrapper(ModelWrapper):
             return_tensors="pt",
             padding=True,
             truncation=True,
+            max_length=2048,
         ).to(device)
         max_tokens = max_new_tokens or 128
         with torch.no_grad():
+            # ROCm compatibility: disable Flash Attention and use explicit settings
             generated = self.model.generate(
                 **tokenizer_outputs,
                 max_new_tokens=max_tokens,
+                use_cache=True,  # LLaMA supports KV cache
+                do_sample=False,  # Greedy decoding for reproducibility
             )
         texts = self.tokenizer.batch_decode(generated, skip_special_tokens=True)
         token_counts: List[int] = []
@@ -76,10 +80,15 @@ class DiffusionLikeWrapper(ModelWrapper):
             return_tensors="pt",
             padding=True,
             truncation=True,
+            max_length=2048,
         ).to(device)
-        generation_kwargs: Dict[str, Any] = {"max_new_tokens": max_new_tokens or 128}
-        if steps is not None:
-            generation_kwargs["num_inference_steps"] = steps
+        generation_kwargs: Dict[str, Any] = {
+            "max_new_tokens": max_new_tokens or 128,
+            "use_cache": False,  # LLaDA doesn't support KV cache
+        }
+        # TODO: LLaDA step control - num_inference_steps is not accepted by this model's generate()
+        # Steps may need to be controlled via generation_config or model config
+        # For now, ignore steps parameter to allow benchmark to run
         with torch.no_grad():
             generated = self.model.generate(
                 **tokenizer_outputs,

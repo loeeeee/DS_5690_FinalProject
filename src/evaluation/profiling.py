@@ -27,12 +27,15 @@ def profile_generation(run_fn: Callable[..., Any], *args: Any, **kwargs: Any) ->
     """Run generation under profiling; returns (result, metrics)."""
     metrics: Dict[str, float] = {}
     if _supports_cuda():
+        # ROCm compatibility: ensure synchronization before timing
+        torch.cuda.synchronize()
+        _cuda_memory_reset()
         start_evt = torch.cuda.Event(enable_timing=True)
         end_evt = torch.cuda.Event(enable_timing=True)
-        _cuda_memory_reset()
         start_evt.record()
         result = run_fn(*args, **kwargs)
         end_evt.record()
+        # Critical: synchronize before reading elapsed time
         torch.cuda.synchronize()
         latency_ms = start_evt.elapsed_time(end_evt)
         metrics["latency_ms"] = float(latency_ms)

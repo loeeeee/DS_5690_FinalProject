@@ -149,22 +149,22 @@ def main() -> None:
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     precision = experiment.get("precision", "bfloat16")
-    model_bundle = load_model_bundle(
-        baseline_id=baseline_id,
-        target_id=target_id,
-        device=device,
-        precision=precision,
-    )
-
+    
     args.output_dir.mkdir(parents=True, exist_ok=True)
     all_rows: List[Dict[str, Any]] = []
+
+    # Load baseline model first, run all baseline experiments, then unload
+    from models.model_factory import _load_auto_model
+    from models.wrappers import AutoRegressiveWrapper
+    baseline_model, baseline_tokenizer = _load_auto_model(baseline_id, device, precision)
+    baseline_wrapper = AutoRegressiveWrapper(baseline_model, baseline_tokenizer)
 
     for seq_length in seq_lengths:
         trimmed_prompts = [p[:seq_length] for p in prompts]
         for batch_size in batch_sizes:
             baseline_rows = _run_model(
                 name="baseline",
-                wrapper=model_bundle.baseline,
+                wrapper=baseline_wrapper,
                 prompts=trimmed_prompts,
                 batch_size=batch_size,
                 seq_length=seq_length,
@@ -173,11 +173,30 @@ def main() -> None:
                 warmup=warmup,
             )
             all_rows.extend(baseline_rows)
+    
+    # Save baseline model/tokenizer for quality metrics, then unload to free memory
+    baseline_quality_model = baseline_model
+    baseline_quality_tokenizer = baseline_tokenizer
+    
+    if device == "cuda":
+        del baseline_model, baseline_wrapper
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+    
+    # Now load LLaDA model
+    from models.wrappers import DiffusionLikeWrapper
+    target_model, target_tokenizer = _load_auto_model(target_id, device, precision)
+    target_wrapper = DiffusionLikeWrapper(target_model, target_tokenizer)
 
+    for seq_length in seq_lengths:
+        trimmed_prompts = [p[:seq_length] for p in prompts]
+        for batch_size in batch_sizes:
             for k in diffusion_steps:
                 llada_rows = _run_model(
                     name=f"llada_steps_{k}",
-                    wrapper=model_bundle.target,
+                    wrapper=target_wrapper,
                     prompts=trimmed_prompts,
                     batch_size=batch_size,
                     seq_length=seq_length,
@@ -190,16 +209,28 @@ def main() -> None:
     csv_path = args.output_dir / "raw_metrics.csv"
     _write_csv(all_rows, csv_path)
 
+    # Compute quality metrics (reload baseline if needed, or use cached)
     metric_rows: Dict[str, Dict[str, float]] = {}
-    for label, wrapper in {"baseline": model_bundle.baseline, "llada": model_bundle.target}.items():
-        metrics = compute_metrics(
-            model=wrapper.model,
-            tokenizer=wrapper.tokenizer,
-            texts=prompts,
-            max_length=max_new_tokens,
-            compute_bertscore=args.compute_bertscore,
-        )
-        metric_rows[label] = metrics
+    
+    # Baseline metrics
+    metrics = compute_metrics(
+        model=baseline_quality_model,
+        tokenizer=baseline_tokenizer,
+        texts=prompts,
+        max_length=max_new_tokens,
+        compute_bertscore=args.compute_bertscore,
+    )
+    metric_rows["baseline"] = metrics
+    
+    # LLaDA metrics
+    metrics = compute_metrics(
+        model=target_model,
+        tokenizer=target_tokenizer,
+        texts=prompts,
+        max_length=max_new_tokens,
+        compute_bertscore=args.compute_bertscore,
+    )
+    metric_rows["llada"] = metrics
 
     metrics_path = args.output_dir / "quality_metrics.json"
     metrics_path.write_text(json.dumps(metric_rows, indent=2))
