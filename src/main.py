@@ -171,20 +171,25 @@ def _run_model(
     batches = list(_batched(prompts, batch_size))
     logger.info(f"Running benchmark for {name}: {len(batches)} batches")
     for batch_idx, batch in enumerate(tqdm(batches, desc=f"Processing batches {name}", leave=False)):
-        logger.info(f"Processing batch {batch_idx+1} for {name}")
+        logger.info(f"Processing batch {batch_idx+1}/{len(batches)} for {name}")
+        logger.info(f"Batch {batch_idx+1} details: batch_size={len(batch)}, steps={steps}, max_new_tokens={max_new_tokens}")
         result: GenerationBatchResult
         try:
+            logger.info(f"Batch {batch_idx+1}: About to call profile_generation")
             result, profile = profile_generation(
                 wrapper.generate_batch,
                 batch,
                 steps=steps,
                 max_new_tokens=max_new_tokens,
             )
+            logger.info(f"Batch {batch_idx+1}: profile_generation completed successfully")
         except Exception as e:
-            logger.error(f"Batch {batch_idx+1} failed for {name}: {e}")
+            logger.error(f"Batch {batch_idx+1} failed for {name}: {e}", exc_info=True)
             raise
+        logger.info(f"Batch {batch_idx+1}: Processing results - token_counts: {result.token_counts}")
         total_tokens = sum(result.token_counts)
         throughput = total_tokens / (profile["latency_ms"] / 1000.0) if profile["latency_ms"] > 0 else 0.0
+        logger.info(f"Batch {batch_idx+1}: Computed metrics - total_tokens={total_tokens}, throughput={throughput:.2f} tok/s")
         rows.append(
             {
                 "model": name,
@@ -200,6 +205,8 @@ def _run_model(
                 "itl_ms": profile.get("itl_ms", math.nan),
             }
         )
+        logger.info(f"Batch {batch_idx+1}: Results appended to rows, moving to next batch")
+    logger.info(f"Completed all {len(batches)} batches for {name}")
     return rows
 
 
