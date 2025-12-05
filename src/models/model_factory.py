@@ -22,7 +22,12 @@ class ModelBundle:
 
 def _load_auto_model(model_id: str, device: str, precision: str) -> tuple[Any, Any]:
     logger.info(f"Loading model {model_id} on device {device} with precision {precision}")
-    torch_dtype = torch.bfloat16 if precision == "bfloat16" else torch.float16
+    if precision == "bfloat16":
+        torch_dtype = torch.bfloat16
+    elif precision == "float32":
+        torch_dtype = torch.float32
+    else:
+        torch_dtype = torch.float16
     tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
     
     # ROCm compatibility: disable Flash Attention and other optimizations that may cause segfaults
