@@ -1,0 +1,8 @@
+# Placeholder dependency list; pin versions once environment is tested.
+torch
+transformers
+accelerate
+pandas
+matplotlib
+tqdm
+
