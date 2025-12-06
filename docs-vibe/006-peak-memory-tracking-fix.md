@@ -217,3 +217,4 @@ result, profile = profile_generation(
 
 The `peak_memory_bytes` metric now accurately reports memory consumption for both CUDA and CPU execution paths. CUDA tracking uses explicit device index `0` for consistency. CPU tracking uses `psutil` with graceful fallback to `resource` module, ensuring accurate peak memory measurement across platforms.
 
+

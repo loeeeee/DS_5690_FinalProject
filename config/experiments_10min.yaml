@@ -1,0 +1,18 @@
+experiment:
+  baseline_id: "meta-llama/Meta-Llama-3-8B"
+  target_id: "GSAI-ML/LLaDA-8B-Base"
+  precision: "float32"
+  max_new_tokens: 4
+  warmup: 0
+  sequence_lengths: [32]
+  batch_sizes: [1]
+  diffusion_steps: [4]
+  notes: "10-minute test configuration - ultra-minimal settings optimized for CPU execution to complete in under 10 minutes while still producing meaningful metrics for both models."
+
+dataset:
+  name: "wikitext"
+  config: "wikitext-103-v1"
+  split: "validation"
+  dataset_size: "small"
+  max_prompts: 1
+
