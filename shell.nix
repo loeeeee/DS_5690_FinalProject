@@ -48,6 +48,7 @@ pkgs.mkShell {
     # export PYTORCH_HIP_ARCH=gfx1100
     # export HSA_OVERRIDE_GFX_VERSION=11.0.0
     # export ROCM_PATH=${rocmPkgs.clr}
+    export OPENBLAS_NUM_THREADS=64
     if [ -f .env ]; then
       set -a
       # shellcheck disable=SC1091
