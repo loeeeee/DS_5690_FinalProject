@@ -1,0 +1,17 @@
+experiment:
+  baseline_id: "meta-llama/Meta-Llama-3-8B"
+  target_id: "GSAI-ML/LLaDA-8B-Base"
+  precision: "bfloat16"
+  max_new_tokens: 128
+  warmup: 3
+  sequence_lengths: [512, 1024]
+  batch_sizes: [1, 4]
+  diffusion_steps: [32, 64, 128]
+  notes: "Use BF16, identical token budget for LLaMA (generate) and LLaDA (mask)."
+
+dataset:
+  name: "wikitext"
+  config: "wikitext-103-v1"
+  split: "validation"
+  dataset_size: "medium"
+  max_prompts: 32
